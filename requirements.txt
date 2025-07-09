@@ -1,0 +1,27 @@
+# Core dependencies from original notebook
+jiwer==3.1.0
+accelerate
+transformers
+soundfile
+peft
+evaluate
+
+# SALT framework (install manually: git clone https://github.com/SunbirdAI/salt.git && pip install -r salt/requirements.txt)
+# Note: You need to clone SALT separately and install its requirements
+
+# Additional core dependencies
+torch>=1.13.0
+datasets>=2.8.0
+numpy>=1.21.0
+PyYAML>=6.0
+tqdm>=4.64.0
+pandas>=1.5.0
+huggingface_hub>=0.10.0
+
+# Optional: MLflow logging (enabled by default)
+mlflow
+psutil
+pynvml
+
+# Optional: Weights & Biases logging (disabled by default)
+# wandb>=0.13.0
