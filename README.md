@@ -5,7 +5,7 @@ Evaluating Whisper performance wrt hours of labelled kinyarwanda audio
 Clone and install
 
 ```
-git clone <your-repo-url>
+git clone git@github.com:SunbirdAI/kinyarwanda-whisper-eval.git
 cd kinyarwanda-whisper-eval
 uv sync
 ```
