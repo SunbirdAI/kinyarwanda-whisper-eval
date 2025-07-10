@@ -21,7 +21,8 @@ dependencies = [
     "psutil",
     "pynvml",
     "clean-text>=0.6.0",
-    "librosa>=0.11.0",
     "nlpaug>=1.1.11",
     "ipython>=9.4.0",
+    "librosa>=0.11.0",
+    "torchcodec",
 ]
