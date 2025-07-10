@@ -2,25 +2,29 @@
 Evaluating Whisper performance wrt hours of labelled kinyarwanda audio
 
 
-# Clone and install
+Clone and install
+
 ```
 git clone <your-repo-url>
 cd kinyarwanda-whisper-eval
 uv sync
 ```
 
-# Install SALT framework  
+Install SALT framework  
+
 ```
 git clone https://github.com/SunbirdAI/salt.git
 uv pip install -r salt/requirements.txt
 ```
 
-# Set up environment
+Set up environment
+
+
 ```bash
 cp env_example .env
 ```
 
-# Edit .env with your MLflow and HF credentials
+Edit .env with your MLflow and HF credentials
 
 
 # Usage
@@ -36,7 +40,7 @@ uv run python train.py --config configs/train_10h.yaml
 uv run python train.py --config configs/train_20h.yaml
 uv run python train.py --config configs/train_50h.yaml
 ```
-# etc...
+etc...
 
 
 ### Available Configs
