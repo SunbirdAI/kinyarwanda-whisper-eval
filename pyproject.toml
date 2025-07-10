@@ -1,27 +1,27 @@
 [project]
 name = "kinyarwanda-whisper-eval"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
+description = "Evaluating Whisper performance on Kinyarwanda audio"
 requires-python = ">=3.11"
 dependencies = [
-    "aiohttp>=3.12.13",
-    "clean-text>=0.6.0",
-    "cleantext>=1.1.4",
-    "datasets==2.16.1",
-    "evaluate>=0.4.4",
-    "ipython>=9.4.0",
-    "jiwer>=4.0.0",
-    "librosa>=0.11.0",
-    "mlflow>=3.1.1",
-    "multiprocess>=0.70.15",
-    "nlpaug>=1.1.11",
-    "nltk>=3.9.1",
-    "peft>=0.16.0",
-    "pyyaml>=6.0.2",
-    "ruff>=0.12.2",
-    "torch>=2.7.1",
-    "torchcodec>=0.4.0",
+    "jiwer>=3.1.0",
+    "accelerate",
     "transformers>=4.53.1",
-    "unidecode>=1.4.0",
+    "soundfile",
+    "peft>=0.16.0",
+    "evaluate>=0.4.4",
+    "torch>=2.7.1",
+    "datasets>=2.16.1",
+    "numpy>=1.21.0",
+    "pyyaml>=6.0.2",
+    "tqdm>=4.64.0",
+    "pandas>=1.5.0",
+    "huggingface_hub>=0.10.0",
+    "mlflow>=3.1.1",
+    "psutil",
+    "pynvml",
+    "clean-text>=0.6.0",
+    "librosa>=0.11.0",
+    "nlpaug>=1.1.11",
+    "ipython>=9.4.0",
 ]
