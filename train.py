@@ -115,7 +115,7 @@ training_args:
     gradient_accumulation_steps: 2
     learning_rate: 1.0e-5
     warmup_steps: 100
-    max_steps: 40000
+    max_steps: 10000
     gradient_checkpointing: True
     gradient_checkpointing_kwargs:
       use_reentrant: False
