@@ -15,15 +15,14 @@ import numpy as np
 import evaluate
 import salt.dataset
 import salt.metrics
-import salt.constants
 from datasets import load_dataset
-import peft
 from dataclasses import dataclass
 from typing import Any, Dict, List, Union
 from datetime import datetime
 import logging
 
-# logging
+from utils import prepare_dataset_hf_with_augmentations, prepare_dataset_salt
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -67,7 +66,6 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         return batch
 
 
-# helper functions
 def setup_logging_backends(use_wandb: bool, use_mlflow: bool, run_name: str):
     if use_wandb:
         try:
@@ -104,74 +102,12 @@ def setup_logging_backends(use_wandb: bool, use_mlflow: bool, run_name: str):
             raise
 
 
-def prepare_dataset_salt(
-    example, sentence_to_prompt, feature_extractor, processor, p_prompt: float = 0.0
-):
-    # used for validation via salt.dataset.create
-    audio = example["source"]
-    input_features = feature_extractor(
-        audio, sampling_rate=16_000, do_normalize=True
-    ).input_features[0]
-    labels = processor.tokenizer(str(example["target"])).input_ids
-    labels.insert(
-        1, salt.constants.SALT_LANGUAGE_TOKENS_WHISPER[example["target.language"]]
-    )
-    prompt = sentence_to_prompt.get(example["target"], None)
-    if prompt and np.random.rand() < p_prompt:
-        labels = list(processor.get_prompt_ids(prompt)) + labels
-    return {
-        "input_features": input_features,
-        "labels": np.array(labels, dtype=np.int64),
-        "source.language": example["source.language"],
-        "target.language": example["target.language"],
-    }
-
-
-def prepare_dataset_hf(
-    example, sentence_to_prompt, feature_extractor, processor, p_prompt: float = 0.0
-):
-    # for streaming HF dataset
-    audio_array = None
-    if "audio" in example:
-        audio_array = example["audio"]["array"]
-    elif "source" in example:
-        audio_array = example["source"]
-    else:
-        raise KeyError("No audio field in example")
-    input_features = feature_extractor(
-        audio_array, sampling_rate=16_000, do_normalize=True
-    ).input_features[0]
-    # target text
-    if "target" in example:
-        text = example["target"]
-    elif "text" in example:
-        text = example["text"]
-    else:
-        raise KeyError("No text field in example")
-    labels = processor.tokenizer(str(text)).input_ids
-    # insert fixed Kinyarwanda token
-    labels.insert(1, salt.constants.SALT_LANGUAGE_TOKENS_WHISPER["kin"])
-    prompt = sentence_to_prompt.get(text, None)
-    if prompt and np.random.rand() < p_prompt:
-        labels = list(processor.get_prompt_ids(prompt)) + labels
-    return {
-        "input_features": input_features,
-        "labels": np.array(labels, dtype=np.int64),
-    }
-
-
 def get_training_config(exp_cfg: ExperimentConfig) -> dict:
     hub_model_id = exp_cfg.hub_model_id or f"akera/{exp_cfg.experiment_name}"
     tpl = f"""
 pretrained_model: openai/whisper-large-v3
 num_workers: 4
 use_peft: False
-lora_config:
-    r: 32
-    lora_alpha: 64
-    target_modules: ["q_proj", "v_proj"]
-    lora_dropout: 0.05
-    bias: "none"
 
 training_args:
     per_device_train_batch_size: 8
@@ -179,7 +115,7 @@ training_args:
     gradient_accumulation_steps: 2
     learning_rate: 1.0e-5
     warmup_steps: 100
-    max_steps: 10000
+    max_steps: 40000
     gradient_checkpointing: True
     gradient_checkpointing_kwargs:
       use_reentrant: False
@@ -197,12 +133,6 @@ training_args:
     hub_model_id: {hub_model_id}
     save_total_limit: 2
 
-train:
-    huggingface_load:
-      - path: evie-8/kinyarwanda-speech-hackathon
-        name: {exp_cfg.dataset_subset}
-        split: train
-
 validation:
     huggingface_load:
       - path: jq/kinyarwanda-speech-hackathon
@@ -218,6 +148,8 @@ validation:
       language: [kin]
       preprocessing:
         - lower_case
+        - clean_and_remove_punctuation:
+            allowed_punctuation: "'"
 """
     return yaml.safe_load(tpl)
 
@@ -228,7 +160,6 @@ def load_experiment_config(path: str) -> ExperimentConfig:
     return ExperimentConfig(**data)
 
 
-# main
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
@@ -253,13 +184,11 @@ def main():
     output_dir = f"{exp_cfg.experiment_name}_{timestamp}"
     os.makedirs(output_dir, exist_ok=True)
 
-    # save configs
     with open(os.path.join(output_dir, "experiment_config.yaml"), "w") as f:
         yaml.safe_dump(vars(exp_cfg), f)
     with open(os.path.join(output_dir, "training_config.yaml"), "w") as f:
         yaml.safe_dump(cfg, f)
 
-    # load prompts
     try:
         ds_prompts = load_dataset(
             "evie-8/kinyarwanda-speech-hackathon",
@@ -272,7 +201,6 @@ def main():
         logger.warning(f"⚠️ Could not load prompts ({e}); continuing.")
         sentence_to_prompt = {}
 
-    # model & processor
     feature_extractor = transformers.WhisperFeatureExtractor.from_pretrained(
         cfg["pretrained_model"]
     )
@@ -284,7 +212,6 @@ def main():
     )
     model.config.use_cache = False
 
-    # validation (non-streaming)
     valid_ds = salt.dataset.create(cfg["validation"], verbose=True)
     val_data = valid_ds.map(
         lambda ex: prepare_dataset_salt(
@@ -300,7 +227,6 @@ def main():
         speech_processor=processor,
     )
 
-    # training (streaming)
     raw_train = load_dataset(
         "evie-8/kinyarwanda-speech-hackathon",
         name=exp_cfg.dataset_subset,
@@ -308,7 +234,7 @@ def main():
         streaming=True,
     )
     train_data = raw_train.map(
-        lambda ex: prepare_dataset_hf(
+        lambda ex: prepare_dataset_hf_with_augmentations(
             ex, sentence_to_prompt, feature_extractor, processor
         ),
         remove_columns=raw_train.column_names,
