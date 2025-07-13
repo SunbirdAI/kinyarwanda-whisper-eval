@@ -199,7 +199,7 @@ train:
         - clean_and_remove_punctuation:
             allowed_punctuation: "'"
       language: [kin]
-    shuffle: true
+    shuffle: false
 
 validation:
     huggingface_load:
