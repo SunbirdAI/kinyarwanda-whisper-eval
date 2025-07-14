@@ -1,7 +1,0 @@
-# 10 hours training configuration (using closest available subset)
-experiment_name: "whisper-large-v3-kin-10h"
-run_training: true  # Enable training
-dataset_subset: "audio_10h"  # Use the 1h subset from evie-8/kinyarwanda-speech-hackathon
-use_wandb: false
-use_mlflow: true
-seed: 42
