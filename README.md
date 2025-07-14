@@ -42,8 +42,17 @@ uv run python train.py --config configs/train_50h.yaml
 ```
 etc...
 
+#### Run Evaluation 
 
-### Available Configs
+Now takes path to the trained mdoel and the batch size for faster inference
+
+```
+uv run python eval.py --model_path openai/whisper-large-v3 --batch_size=8
+
+```
+
+
+### Available training Configs
 
 ```
 baseline.yaml - Evaluate pre-trained Whisper (no training)
