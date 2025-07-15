@@ -1,0 +1,7 @@
+# Full subset training configuration
+experiment_name: "whisper-large-v3-kin-full"
+dataset_subset: "train_cleaned" # Use the full subset from evie-8/kinyarwanda-speech-hackathon
+use_wandb: false
+use_mlflow: true
+seed: 42
+
