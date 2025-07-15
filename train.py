@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Union
 from datetime import datetime
 import logging
+from transformers import EarlyStoppingCallback
+
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -49,6 +51,7 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         batch = self.processor.feature_extractor.pad(
             input_features, return_tensors="pt"
         )
+        batch["input_features"] = batch["input_features"].to(torch.bfloat16)
 
         label_features = [{"input_ids": feature["labels"]} for feature in features]
         labels_batch = self.processor.tokenizer.pad(label_features, return_tensors="pt")
@@ -141,26 +144,27 @@ def build_salt_config(experiment_config: ExperimentConfig) -> dict:
     # Create YAML structure 
     config_yaml = f"""
 pretrained_model: openai/whisper-large-v3
-num_workers: 4
+num_workers: 12
 use_peft: false
 
 training_args:
     output_dir: {experiment_config.experiment_name}
     per_device_train_batch_size: 16
     per_device_eval_batch_size: 16
+    dataloader_pin_memory: true
     gradient_accumulation_steps: 2
     learning_rate: 1.0e-5
     warmup_steps: 100
-    max_steps: 10000
-    gradient_checkpointing: true
+    max_steps: 25000
+    gradient_checkpointing: false
     gradient_checkpointing_kwargs:
       use_reentrant: false
-    fp16: true
+    bf16: true
     eval_strategy: steps
     predict_with_generate: true
     generation_max_length: 200
-    save_steps: 1000
-    eval_steps: 200
+    save_steps: 400
+    eval_steps: 400
     logging_steps: 200
     load_best_model_at_end: true
     metric_for_best_model: loss
@@ -168,6 +172,7 @@ training_args:
     push_to_hub: true
     hub_model_id: akera/{experiment_config.experiment_name}
     save_total_limit: 2
+    
 
 train:
     download_datasets_in_parallel: false
@@ -175,6 +180,11 @@ train:
         - path: evie-8/kinyarwanda-speech-hackathon
           name: {experiment_config.dataset_subset}
           split: train
+          num_proc: 10
+        - path: evie-8/kinyarwanda-speech-hackathon
+          name: {experiment_config.dataset_subset}
+          split: train[:100]
+          num_proc: 10
     source:
       type: speech
       language: [kin]
@@ -199,7 +209,7 @@ train:
         - clean_and_remove_punctuation:
             allowed_punctuation: "'"
       language: [kin]
-    shuffle: false
+    shuffle: True
 
 validation:
     huggingface_load:
@@ -305,7 +315,9 @@ def main():
         config["pretrained_model"], language=None, task="transcribe"
     )
     model = transformers.WhisperForConditionalGeneration.from_pretrained(
-        config["pretrained_model"]
+        config["pretrained_model"],
+        torch_dtype=torch.bfloat16,
+        attn_implementation="flash_attention_2"
     )
 
     logger.info("🔧 Preparing datasets...")
@@ -360,22 +372,33 @@ def main():
         eval_dataset=val_data,
         data_collator=data_collator,
         compute_metrics=compute_metrics,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=10)],
         processing_class=processor,
     )
+
+    # log GPU name and VRAM to mlflow
+    gpu_name = torch.cuda.get_device_name(0)
+    vram_gb = round(torch.cuda.get_device_properties(0).total_memory / (1024**3), 2)
 
     logger.info("🏃 Starting training...")
     trainer.train()
 
     logger.info("📝 Running final evaluation...")
     results = trainer.evaluate()
+    
 
     # Log to MLflow if enabled
     if experiment_config.use_mlflow:
         import mlflow
 
+
+
         mlflow.log_params(config)
         mlflow.log_param("experiment_type", "fine_tuning")
         mlflow.log_param("dataset_subset", experiment_config.dataset_subset)
+        
+        mlflow.log_param("gpu_name", gpu_name)
+        mlflow.log_param("vram_gb", vram_gb)
         for key, value in results.items():
             if isinstance(value, (int, float)):
                 mlflow.log_metric(key, value)
