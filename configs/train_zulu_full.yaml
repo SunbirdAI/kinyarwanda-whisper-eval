@@ -1,0 +1,19 @@
+# Zulu language training configuration
+experiment_name: "whisper-large-v3-zulu-full"
+dataset_subset: "audio_100h"
+use_wandb: false
+use_mlflow: true
+seed: 42
+mlflow_experiment_base_name: "whisper-zulu-eval"
+
+language:
+  code: "zul"
+  name: "Zulu"
+  train_dataset_path: "evie-8/zulu-speech-data"
+  train_dataset_name: null
+  train_split: "train"
+  validation_dataset_path: "evie-8/zulu-speech-data"
+  validation_dataset_name: null
+  validation_split: "dev_test[:200]"
+  insert_language_token: true  
+  custom_language_token: null
