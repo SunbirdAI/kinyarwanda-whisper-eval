@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Kinyarwanda Whisper fine-tuning script.
-Usage: uv run python train.py --config configs/train_50h.yaml
+Multi-language Whisper fine-tuning script.
+Usage: uv run python train.py --config configs/train_zulu_100h.yaml
 """
 
 import argparse
@@ -16,7 +16,7 @@ import salt.metrics
 import salt.constants
 from datasets import load_dataset
 from dataclasses import dataclass
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Union, Optional
 from datetime import datetime
 import logging
 from transformers import EarlyStoppingCallback
@@ -29,12 +29,30 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class LanguageConfig:
+    """Language-specific configuration"""
+
+    code: str  # e.g., 'zul', 'kin', 'en'
+    name: str  # e.g., 'Zulu', 'Kinyarwanda', 'English'
+    train_dataset_path: str
+    validation_dataset_path: str
+    train_dataset_name: Optional[str] = None
+    train_split: str = "train"
+    validation_dataset_name: Optional[str] = None
+    validation_split: str = "dev"
+    insert_language_token: bool = True
+    custom_language_token: Optional[int] = None
+
+
+@dataclass
 class ExperimentConfig:
     experiment_name: str
+    language: LanguageConfig
     dataset_subset: str = "audio_50h"
     use_wandb: bool = False
     use_mlflow: bool = True
     seed: int = 42
+    mlflow_experiment_base_name: str = "whisper-zul-eval"
 
 
 @dataclass
@@ -51,7 +69,7 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         batch = self.processor.feature_extractor.pad(
             input_features, return_tensors="pt"
         )
-        batch["input_features"] = batch["input_features"].to(torch.bfloat16)
+        # batch["input_features"] = batch["input_features"].to(torch.bfloat16)
 
         label_features = [{"input_ids": feature["labels"]} for feature in features]
         labels_batch = self.processor.tokenizer.pad(label_features, return_tensors="pt")
@@ -67,8 +85,10 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         return batch
 
 
-def setup_logging_backends(use_wandb: bool, use_mlflow: bool, experiment_name: str):
-    """Setup logging backends """
+def setup_logging_backends(
+    use_wandb: bool, use_mlflow: bool, experiment_name: str, mlflow_experiment_name: str
+):
+    """Setup logging backends"""
     if use_wandb:
         try:
             import wandb
@@ -92,10 +112,10 @@ def setup_logging_backends(use_wandb: bool, use_mlflow: bool, experiment_name: s
             if "MLFLOW_TRACKING_PASSWORD" not in os.environ:
                 os.environ["MLFLOW_TRACKING_PASSWORD"] = getpass("MLFLOW password: ")
 
-            os.environ["MLFLOW_EXPERIMENT_NAME"] = "whisper-kinyarwanda-eval"
             mlflow.set_tracking_uri(
                 "https://mlflow-sunbird-ce0ecfc14244.herokuapp.com/"
             )
+            mlflow.set_experiment(mlflow_experiment_name)
             mlflow.system_metrics.enable_system_metrics_logging()
             mlflow.start_run(run_name=experiment_name)
             logger.info("✅ MLflow initialized")
@@ -105,9 +125,14 @@ def setup_logging_backends(use_wandb: bool, use_mlflow: bool, experiment_name: s
 
 
 def prepare_dataset(
-    example, sentence_to_prompt, feature_extractor, processor, p_prompt=0.0
+    example,
+    sentence_to_prompt,
+    feature_extractor,
+    processor,
+    language_config,
+    p_prompt=0.0,
 ):
-    """Data prep """
+    """Data prep"""
     audio = example["source"]
     input_features = feature_extractor(
         audio,
@@ -120,15 +145,21 @@ def prepare_dataset(
     labels = processor.tokenizer(str(example["target"])).input_ids
 
     # Insert the language ID token into the second position of the sequence.
-    labels.insert(
-        1, salt.constants.SALT_LANGUAGE_TOKENS_WHISPER[example["target.language"]]
-    )
+    if example["target.language"] in salt.constants.SALT_LANGUAGE_TOKENS_WHISPER:
+        labels.insert(
+            1, salt.constants.SALT_LANGUAGE_TOKENS_WHISPER[example["target.language"]]
+        )
+    # If language not in SALT constants, skip language token insertion
 
     # If a prompt is known for a particular sentence, add it to the training example
     prompt = sentence_to_prompt.get(example["target"], None)
     if prompt and np.random.random() < p_prompt:
         prompt_ids = list(processor.get_prompt_ids(prompt))
         labels = prompt_ids + labels
+
+    # Truncate labels if they're too long (Whisper max is 448 tokens)
+    if len(labels) > 448:
+        labels = labels[:448]
 
     return {
         "input_features": input_features,
@@ -141,7 +172,7 @@ def prepare_dataset(
 def build_salt_config(experiment_config: ExperimentConfig) -> dict:
     """Build the SALT config"""
 
-    # Create YAML structure 
+    # Create YAML structure
     config_yaml = f"""
 pretrained_model: openai/whisper-large-v3
 num_workers: 12
@@ -156,10 +187,10 @@ training_args:
     learning_rate: 1.0e-5
     warmup_steps: 100
     max_steps: 25000
-    gradient_checkpointing: false
+    gradient_checkpointing: true
     gradient_checkpointing_kwargs:
       use_reentrant: false
-    bf16: true
+    fp16: true
     eval_strategy: steps
     predict_with_generate: true
     generation_max_length: 200
@@ -172,22 +203,22 @@ training_args:
     push_to_hub: true
     hub_model_id: akera/{experiment_config.experiment_name}
     save_total_limit: 2
-    
+
 
 train:
     download_datasets_in_parallel: false
     huggingface_load:
-        - path: evie-8/kinyarwanda-speech-hackathon
-          name: {experiment_config.dataset_subset}
-          split: train
+        - path: {experiment_config.language.train_dataset_path}
+          {"name: " + experiment_config.language.train_dataset_name if experiment_config.language.train_dataset_name else ""}
+          split: {experiment_config.language.train_split}
           num_proc: 10
-        - path: evie-8/kinyarwanda-speech-hackathon
-          name: {experiment_config.dataset_subset}
-          split: train[:100]
+        - path: {experiment_config.language.train_dataset_path}
+          {"name: " + experiment_config.language.train_dataset_name if experiment_config.language.train_dataset_name else ""}
+          split: {experiment_config.language.train_split}[:100]
           num_proc: 10
     source:
       type: speech
-      language: [kin]
+      language: [{experiment_config.language.code}]
       preprocessing:
         # preprocessing from SALT
         - set_sample_rate:
@@ -208,22 +239,23 @@ train:
         - lower_case
         - clean_and_remove_punctuation:
             allowed_punctuation: "'"
-      language: [kin]
+      language: [{experiment_config.language.code}]
     shuffle: True
 
 validation:
     huggingface_load:
-        - path: jq/kinyarwanda-speech-hackathon
-          split: dev_test[:200]
+        - path: {experiment_config.language.validation_dataset_path}
+          {"name: " + experiment_config.language.validation_dataset_name if experiment_config.language.validation_dataset_name else ""}
+          split: {experiment_config.language.validation_split}
     source:
       type: speech
-      language: [kin]
+      language: [{experiment_config.language.code}]
       preprocessing:
         - set_sample_rate:
             rate: 16_000
     target:
       type: text
-      language: [kin]
+      language: [{experiment_config.language.code}]
       preprocessing:
         - lower_case
         - clean_and_remove_punctuation:
@@ -237,12 +269,17 @@ def load_experiment_config(config_path: str) -> ExperimentConfig:
     """Load experiment config from YAML."""
     with open(config_path, "r") as f:
         config_dict = yaml.safe_load(f)
+
+    # Create LanguageConfig from nested dict
+    language_config = LanguageConfig(**config_dict.pop("language"))
+    config_dict["language"] = language_config
+
     return ExperimentConfig(**config_dict)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train Whisper on Kinyarwanda speech data"
+        description="Train Whisper on multilingual speech data"
     )
     parser.add_argument(
         "--config", type=str, required=True, help="Path to experiment configuration"
@@ -256,15 +293,22 @@ def main():
 
     logger.info("=" * 60)
     logger.info(f"🎯 Experiment: {experiment_config.experiment_name}")
+    logger.info(
+        f"🌍 Language: {experiment_config.language.name} ({experiment_config.language.code})"
+    )
     logger.info(f"📊 Dataset: {experiment_config.dataset_subset}")
     logger.info(f"🎲 Seed: {experiment_config.seed}")
     logger.info("=" * 60)
+
+    # Create MLflow experiment name
+    mlflow_experiment_name = experiment_config.mlflow_experiment_base_name
 
     # Setup logging
     setup_logging_backends(
         experiment_config.use_wandb,
         experiment_config.use_mlflow,
         experiment_config.experiment_name,
+        mlflow_experiment_name,
     )
 
     # Build SALT config
@@ -281,7 +325,26 @@ def main():
     # Create output directory and save configs
     os.makedirs(output_dir, exist_ok=True)
     with open(os.path.join(output_dir, "experiment_config.yaml"), "w") as f:
-        yaml.dump(experiment_config.__dict__, f, default_flow_style=False)
+        # Convert dataclasses to dict for YAML serialization
+        config_dict = {
+            "experiment_name": experiment_config.experiment_name,
+            "language": {
+                "code": experiment_config.language.code,
+                "name": experiment_config.language.name,
+                "train_dataset_path": experiment_config.language.train_dataset_path,
+                "train_dataset_name": experiment_config.language.train_dataset_name,
+                "train_split": experiment_config.language.train_split,
+                "validation_dataset_path": experiment_config.language.validation_dataset_path,
+                "validation_dataset_name": experiment_config.language.validation_dataset_name,
+                "validation_split": experiment_config.language.validation_split,
+            },
+            "dataset_subset": experiment_config.dataset_subset,
+            "use_wandb": experiment_config.use_wandb,
+            "use_mlflow": experiment_config.use_mlflow,
+            "seed": experiment_config.seed,
+            "mlflow_experiment_base_name": experiment_config.mlflow_experiment_base_name,
+        }
+        yaml.dump(config_dict, f, default_flow_style=False)
     with open(os.path.join(output_dir, "full_config.yaml"), "w") as f:
         yaml.dump(config, f, default_flow_style=False)
 
@@ -295,14 +358,21 @@ def main():
     # Load prompts
     try:
         ds_prompts = load_dataset(
-            "evie-8/kinyarwanda-speech-hackathon",
-            name=experiment_config.dataset_subset,
-            split="train",
+            experiment_config.language.train_dataset_path,
+            name=experiment_config.language.train_dataset_name,
+            split=experiment_config.language.train_split,
         )
-        text = list(ds_prompts["text"])
-        prompts = list(ds_prompts["prompt"])
-        sentence_to_prompt = {t: p for t, p in zip(text, prompts)}
-        logger.info(f"✅ Loaded {len(sentence_to_prompt)} prompts")
+        # Check if prompts exist in the dataset
+        if "prompt" in ds_prompts.column_names and "text" in ds_prompts.column_names:
+            text = list(ds_prompts["text"])
+            prompts = list(ds_prompts["prompt"])
+            sentence_to_prompt = {t: p for t, p in zip(text, prompts)}
+            logger.info(f"✅ Loaded {len(sentence_to_prompt)} prompts")
+        else:
+            logger.info(
+                "ℹ️ No prompt column found in dataset, proceeding without prompts"
+            )
+            sentence_to_prompt = {}
     except Exception as e:
         logger.warning(f"⚠️ Could not load prompts: {e}")
         sentence_to_prompt = {}
@@ -315,23 +385,36 @@ def main():
         config["pretrained_model"], language=None, task="transcribe"
     )
     model = transformers.WhisperForConditionalGeneration.from_pretrained(
-        config["pretrained_model"],
-        torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2"
+        config["pretrained_model"]
+        # torch_dtype=torch.bfloat16,
+        # attn_implementation="flash_attention_2"
     )
 
     logger.info("🔧 Preparing datasets...")
+
     # Map datasets
     train_data = train_ds.map(
-        lambda x: prepare_dataset(x, sentence_to_prompt, feature_extractor, processor),
+        lambda x: prepare_dataset(
+            x,
+            sentence_to_prompt,
+            feature_extractor,
+            processor,
+            experiment_config.language,
+        ),
         remove_columns=["source", "target"],
     )
     val_data = valid_ds.map(
-        lambda x: prepare_dataset(x, sentence_to_prompt, feature_extractor, processor),
+        lambda x: prepare_dataset(
+            x,
+            sentence_to_prompt,
+            feature_extractor,
+            processor,
+            experiment_config.language,
+        ),
         remove_columns=["source", "target"],
     )
 
-    # Setup compute metrics 
+    # Setup compute metrics
     compute_metrics = salt.metrics.multilingual_eval_fn(
         valid_ds,
         [evaluate.load("wer"), evaluate.load("cer")],
@@ -385,18 +468,16 @@ def main():
 
     logger.info("📝 Running final evaluation...")
     results = trainer.evaluate()
-    
 
     # Log to MLflow if enabled
     if experiment_config.use_mlflow:
         import mlflow
 
-
-
         mlflow.log_params(config)
         mlflow.log_param("experiment_type", "fine_tuning")
         mlflow.log_param("dataset_subset", experiment_config.dataset_subset)
-        
+        mlflow.log_param("language_code", experiment_config.language.code)
+        mlflow.log_param("language_name", experiment_config.language.name)
         mlflow.log_param("gpu_name", gpu_name)
         mlflow.log_param("vram_gb", vram_gb)
         for key, value in results.items():
