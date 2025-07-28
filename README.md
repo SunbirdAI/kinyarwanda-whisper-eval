@@ -56,16 +56,17 @@ uv run python eval.py --model_path <model_path_or_hf_id> --batch_size=8
 
 ## 📁 Training Configs
 
-| Config            | Hours | Model ID on Hugging Face        |
-| ----------------- | ----- | ------------------------------- |
-| `baseline.yaml`   | 0     | openai/whisper-large-v3         |
-| `train_1h.yaml`   | 1     | akera/whisper-large-v3-kin-1h   |
-| `train_10h.yaml`  | 10    | akera/whisper-large-v3-kin-10h  |
-| `train_50h.yaml`  | 50    | akera/whisper-large-v3-kin-50h  |
-| `train_100h.yaml` | 100   | akera/whisper-large-v3-kin-100h |
-| `train_150h.yaml` | 150   | akera/whisper-large-v3-kin-150h |
-| `train_200h.yaml` | 200   | akera/whisper-large-v3-kin-200h |
-| `train_500h.yaml` | 500   | akera/whisper-large-v3-kin-500h |
+| Config             | Hours  | Model ID on Hugging Face            |
+| ------------------ | ------ | ----------------------------------- |
+| `baseline.yaml`    | 0      | openai/whisper-large-v3             |
+| `train_1h.yaml`    | 1      | akera/whisper-large-v3-kin-1h-v2    |
+| `train_50h.yaml`   | 50     | akera/whisper-large-v3-kin-50h-v2   |
+| `train_100h.yaml`  | 100    | akera/whisper-large-v3-kin-100h-v2  |
+| `train_150h.yaml`  | 150    | akera/whisper-large-v3-kin-150h-v2  |
+| `train_200h.yaml`  | 200    | akera/whisper-large-v3-kin-200h-v2  |
+| `train_500h.yaml`  | 500    | akera/whisper-large-v3-kin-500h-v2  |
+| `train_1000h.yaml` | 1000   | akera/whisper-large-v3-kin-1000h-v2 |
+| `train_full.yaml`  | \~1400 | akera/whisper-large-v3-kin-full     |
 
 Explore the collection:
 👉 [https://huggingface.co/collections/Sunbird/kinyarwanda-hackathon-68872541c41c5d166d9bffad](https://huggingface.co/collections/Sunbird/kinyarwanda-hackathon-68872541c41c5d166d9bffad)
@@ -76,16 +77,17 @@ Explore the collection:
 
 Evaluation on `dev_test[:300]` subset:
 
-| Model                             | Hours | WER   | CER   | Score |
-| --------------------------------- | ----- | ----- | ----- | ----- |
-| `openai/whisper-large-v3`         | 0     | 0.331 | 0.098 | 0.861 |
-| `akera/whisper-large-v3-kin-1h`   | 1     | 0.288 | 0.085 | 0.891 |
-| `akera/whisper-large-v3-kin-10h`  | 10    | 0.254 | 0.074 | 0.910 |
-| `akera/whisper-large-v3-kin-50h`  | 50    | 0.217 | 0.060 | 0.930 |
-| `akera/whisper-large-v3-kin-100h` | 100   | 0.198 | 0.057 | 0.939 |
-| `akera/whisper-large-v3-kin-150h` | 150   | 0.184 | 0.052 | 0.947 |
-| `akera/whisper-large-v3-kin-200h` | 200   | 0.176 | 0.050 | 0.951 |
-| `akera/whisper-large-v3-kin-500h` | 500   | 0.167 | 0.048 | 0.956 |
+| Model                                 | Hours  | WER (%) | CER (%) | Score |
+| ------------------------------------- | ------ | ------- | ------- | ----- |
+| `openai/whisper-large-v3`             | 0      | 33.10   | 9.80    | 0.861 |
+| `akera/whisper-large-v3-kin-1h-v2`    | 1      | 47.63   | 16.97   | 0.754 |
+| `akera/whisper-large-v3-kin-50h-v2`   | 50     | 12.51   | 3.31    | 0.932 |
+| `akera/whisper-large-v3-kin-100h-v2`  | 100    | 10.90   | 2.84    | 0.943 |
+| `akera/whisper-large-v3-kin-150h-v2`  | 150    | 10.21   | 2.64    | 0.948 |
+| `akera/whisper-large-v3-kin-200h-v2`  | 200    | 9.82    | 2.56    | 0.951 |
+| `akera/whisper-large-v3-kin-500h-v2`  | 500    | 8.24    | 2.15    | 0.963 |
+| `akera/whisper-large-v3-kin-1000h-v2` | 1000   | 7.65    | 1.98    | 0.967 |
+| `akera/whisper-large-v3-kin-full`     | \~1400 | 7.14    | 1.88    | 0.970 |
 
 > Score = 1 - (0.6 × CER + 0.4 × WER)
 
