@@ -325,9 +325,9 @@ def main():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = f"{experiment_config.experiment_name}_{timestamp}"
     config["training_args"]["output_dir"] = output_dir
-    config["training_args"][
-        "hub_model_id"
-    ] = f"akera/{experiment_config.experiment_name}_{timestamp}"
+    config["training_args"]["hub_model_id"] = (
+        f"akera/{experiment_config.experiment_name}_{timestamp}"
+    )
 
     # Create output directory and save configs
     os.makedirs(output_dir, exist_ok=True)
