@@ -1,0 +1,10 @@
+# 50 hour Fulani training configuration
+experiment_name: "whisper-large-v3-fulani-50h"
+run_training: true
+dataset_name: "evie-8/afrivoices"
+dataset_subset: "ful"  # Fulani subset
+language_code: "ful"
+target_hours: 50
+use_wandb: false
+use_mlflow: true
+seed: 42

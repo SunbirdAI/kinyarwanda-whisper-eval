@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Evaluation script for Kinyarwanda Whisper models.
+Evaluation script for Multi-language Whisper models.
 Uses direct model.generate for fast, batched GPU throughput
 and shows a live tqdm progress bar over 300 samples.
 """
@@ -20,11 +20,10 @@ import mlflow
 from transformers import WhisperProcessor, WhisperForConditionalGeneration
 from tqdm import tqdm
 import salt.constants
-
+from data_utils import create_hour_based_splits, get_language_code_mapping
 
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -39,11 +38,15 @@ def normalise(texts):
 
 def setup_mlflow(model_path: str):
     if "MLFLOW_TRACKING_USERNAME" not in os.environ:
-        os.environ["MLFLOW_TRACKING_USERNAME"] = getpass("Enter MLFLOW_TRACKING_USERNAME: ")
+        os.environ["MLFLOW_TRACKING_USERNAME"] = getpass(
+            "Enter MLFLOW_TRACKING_USERNAME: "
+        )
     if "MLFLOW_TRACKING_PASSWORD" not in os.environ:
-        os.environ["MLFLOW_TRACKING_PASSWORD"] = getpass("Enter MLFLOW_TRACKING_PASSWORD: ")
+        os.environ["MLFLOW_TRACKING_PASSWORD"] = getpass(
+            "Enter MLFLOW_TRACKING_PASSWORD: "
+        )
 
-    os.environ["MLFLOW_EXPERIMENT_NAME"] = "whisper-kinyarwanda-eval"
+    os.environ["MLFLOW_EXPERIMENT_NAME"] = "whisper-multilingual-eval"
     mlflow.set_tracking_uri("https://mlflow-sunbird-ce0ecfc14244.herokuapp.com/")
 
     run_name = "eval_" + os.path.basename(model_path)
@@ -51,20 +54,42 @@ def setup_mlflow(model_path: str):
     logger.info(f"✅ MLflow initialized with run: {run_name}")
 
 
-def load_validation_dataset():
-    logger.info("📊 Loading validation dataset..")
+def load_validation_dataset(
+    dataset_name: str = "evie-8/afrivoices",
+    language_subset: str = "sna",
+    seed: int = 42,
+):
+    """Load validation dataset with dynamic split creation"""
+    logger.info(f"📊 Loading validation dataset for {language_subset}...")
+
+    # Create test split (uses same logic as training to ensure consistency)
+    _, test_split_info = create_hour_based_splits(
+        dataset_name=dataset_name,
+        language_subset=language_subset,
+        target_hours=1.0,  # This doesn't matter for test split
+        test_size=300,
+        seed=seed,
+    )
+
+    # Load the test split
     ds = datasets.load_dataset(
-        "jq/kinyarwanda-speech-hackathon",
-        split="dev_test[:300]"
+        dataset_name, name=language_subset, split=test_split_info["split"]
     )
     ds = ds.cast_column("audio", datasets.Audio(sampling_rate=16_000))
-    logger.info(f"✅ Loaded {len(ds)} samples")
+
+    logger.info(f"✅ Loaded {len(ds)} samples for evaluation")
     return ds
 
 
-def evaluate_model(model_path: str, batch_size: int):
+def evaluate_model(
+    model_path: str,
+    batch_size: int,
+    dataset_name: str = "evie-8/afrivoices",
+    language_subset: str = "sna",
+    seed: int = 42,
+):
     # Load dataset & snapshot labels
-    ds = load_validation_dataset()
+    ds = load_validation_dataset(dataset_name, language_subset, seed)
     total = len(ds)
     labels = [ex["text"] for ex in ds]
 
@@ -79,9 +104,10 @@ def evaluate_model(model_path: str, batch_size: int):
     processor = WhisperProcessor.from_pretrained(
         model_path, language=None, task="transcribe"
     )
-    model = WhisperForConditionalGeneration.from_pretrained(model_path,torch_dtype=torch_dtype).to(device)
+    model = WhisperForConditionalGeneration.from_pretrained(
+        model_path, torch_dtype=torch_dtype
+    ).to(device)
     model.eval()
-
 
     # **Disable any forced-decoder tokens** that might be baked into config
     model.config.forced_decoder_ids = None
@@ -107,12 +133,12 @@ def evaluate_model(model_path: str, batch_size: int):
             batch_audio,
             sampling_rate=16_000,
             return_tensors="pt",
-            return_attention_mask=True
+            return_attention_mask=True,
         )
 
         inputs = feat.input_features.to(device, dtype=torch_dtype)
         attention_mask = feat.attention_mask.to(device)
-        
+
         gen_ids = model.generate(inputs, attention_mask=attention_mask, **gen_kwargs)
 
         texts = processor.batch_decode(gen_ids, skip_special_tokens=True)
@@ -137,11 +163,19 @@ def evaluate_model(model_path: str, batch_size: int):
     }
 
 
-def log_results(results: dict, model_path: str, batch_size: int):
+def log_results(
+    results: dict,
+    model_path: str,
+    batch_size: int,
+    dataset_name: str,
+    language_subset: str,
+):
     logger.info("📝 Logging results to MLflow...")
     mlflow.log_param("model_path", model_path)
     mlflow.log_param("batch_size", batch_size)
-    mlflow.log_param("dataset_subset", "dev_test[:300]")
+    mlflow.log_param("dataset_name", dataset_name)
+    mlflow.log_param("language_subset", language_subset)
+    mlflow.log_param("dataset_subset", "test[:300]")
     mlflow.log_param("num_samples", len(results["labels"]))
 
     mlflow.log_metric("final_WER", results["final_WER"])
@@ -152,25 +186,56 @@ def log_results(results: dict, model_path: str, batch_size: int):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Fast eval of Kinyarwanda Whisper w/ tqdm bar",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+        description="Fast eval of Multi-language Whisper w/ tqdm bar",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--model_path", required=True, help="HF ID or local path")
-    parser.add_argument("--batch_size", type=int, default=16, help="Inference batch size")
+    parser.add_argument(
+        "--batch_size", type=int, default=16, help="Inference batch size"
+    )
+    parser.add_argument(
+        "--dataset_name", default="evie-8/afrivoices", help="Dataset name"
+    )
+    parser.add_argument(
+        "--language_subset",
+        default="sna",
+        choices=["sna", "ful", "lin"],
+        help="Language subset",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42, help="Random seed for test split"
+    )
     parser.add_argument("--no_mlflow", action="store_true", help="Skip MLflow logging")
     args = parser.parse_args()
 
+    language_mapping = get_language_code_mapping()
+    language_name = {
+        "sna": "Shona",
+        "ful": "Fulani",
+        "lin": "Lingala",
+        "kin": "Kinyarwanda",
+    }.get(args.language_subset, args.language_subset)
+
     logger.info("=" * 60)
-    logger.info("🎯 KINYARWANDA WHISPER EVALUATION")
+    logger.info("🎯 MULTI-LANGUAGE WHISPER EVALUATION")
     logger.info(f"Model:      {args.model_path}")
+    logger.info(f"Language:   {language_name} ({args.language_subset})")
+    logger.info(f"Dataset:    {args.dataset_name}")
     logger.info(f"Batch size: {args.batch_size}")
+    logger.info(f"Seed:       {args.seed}")
     logger.info("=" * 60)
 
     try:
         if not args.no_mlflow:
             setup_mlflow(args.model_path)
 
-        results = evaluate_model(args.model_path, args.batch_size)
+        results = evaluate_model(
+            args.model_path,
+            args.batch_size,
+            args.dataset_name,
+            args.language_subset,
+            args.seed,
+        )
 
         logger.info("=" * 60)
         logger.info("🎉 EVALUATION RESULTS")
@@ -184,7 +249,13 @@ def main():
             logger.info("    ---")
 
         if not args.no_mlflow:
-            log_results(results, args.model_path, args.batch_size)
+            log_results(
+                results,
+                args.model_path,
+                args.batch_size,
+                args.dataset_name,
+                args.language_subset,
+            )
 
         logger.info("✅ Done!")
     except Exception:
@@ -196,4 +267,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

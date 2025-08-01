@@ -1,0 +1,8 @@
+dataset_name: evie-8/afrivoices
+dataset_subset: sna
+experiment_name: baseline_whisper_shona
+language_code: sna
+run_training: false
+seed: 42
+use_mlflow: true
+use_wandb: false

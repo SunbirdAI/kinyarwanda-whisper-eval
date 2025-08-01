@@ -1,0 +1,9 @@
+dataset_name: evie-8/afrivoices
+dataset_subset: lin
+experiment_name: whisper-large-v3-lingala-150h
+language_code: lin
+run_training: true
+seed: 42
+target_hours: 150
+use_mlflow: true
+use_wandb: false

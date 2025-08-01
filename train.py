@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Kinyarwanda Whisper fine-tuning script.
-Usage: uv run python train.py --config configs/train_50h.yaml
+Multi-language Whisper fine-tuning script with dynamic hour-based splits.
+Usage: uv run python train.py --config configs/train_shona_1h.yaml
 """
 
 import argparse
@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Union
 from datetime import datetime
 import logging
 from transformers import EarlyStoppingCallback
-
+from data_utils import create_hour_based_splits, get_language_code_mapping
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -31,10 +31,14 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ExperimentConfig:
     experiment_name: str
-    dataset_subset: str = "audio_50h"
+    dataset_name: str = "evie-8/afrivoices"
+    dataset_subset: str = "sna"  # sna, ful, lin
+    language_code: str = "sna"
+    target_hours: float = 1.0
     use_wandb: bool = False
     use_mlflow: bool = True
     seed: int = 42
+    run_training: bool = True
 
 
 @dataclass
@@ -68,7 +72,7 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 
 
 def setup_logging_backends(use_wandb: bool, use_mlflow: bool, experiment_name: str):
-    """Setup logging backends """
+    """Setup logging backends"""
     if use_wandb:
         try:
             import wandb
@@ -92,7 +96,7 @@ def setup_logging_backends(use_wandb: bool, use_mlflow: bool, experiment_name: s
             if "MLFLOW_TRACKING_PASSWORD" not in os.environ:
                 os.environ["MLFLOW_TRACKING_PASSWORD"] = getpass("MLFLOW password: ")
 
-            os.environ["MLFLOW_EXPERIMENT_NAME"] = "whisper-kinyarwanda-eval"
+            os.environ["MLFLOW_EXPERIMENT_NAME"] = "whisper-multilingual-eval"
             mlflow.set_tracking_uri(
                 "https://mlflow-sunbird-ce0ecfc14244.herokuapp.com/"
             )
@@ -105,9 +109,14 @@ def setup_logging_backends(use_wandb: bool, use_mlflow: bool, experiment_name: s
 
 
 def prepare_dataset(
-    example, sentence_to_prompt, feature_extractor, processor, p_prompt=0.0
+    example,
+    sentence_to_prompt,
+    feature_extractor,
+    processor,
+    language_code,
+    p_prompt=0.0,
 ):
-    """Data prep """
+    """Data prep with language-specific handling"""
     audio = example["source"]
     input_features = feature_extractor(
         audio,
@@ -119,10 +128,12 @@ def prepare_dataset(
     # Encode target text to label ids
     labels = processor.tokenizer(str(example["target"])).input_ids
 
-    # Insert the language ID token into the second position of the sequence.
-    labels.insert(
-        1, salt.constants.SALT_LANGUAGE_TOKENS_WHISPER[example["target.language"]]
-    )
+    # Insert the language ID token - check if language code exists in SALT constants
+    if language_code in salt.constants.SALT_LANGUAGE_TOKENS_WHISPER:
+        language_token = salt.constants.SALT_LANGUAGE_TOKENS_WHISPER[language_code]
+        labels.insert(1, language_token)
+    else:
+        logger.warning(f"Language code {language_code} not found in SALT constants")
 
     # If a prompt is known for a particular sentence, add it to the training example
     prompt = sentence_to_prompt.get(example["target"], None)
@@ -138,10 +149,12 @@ def prepare_dataset(
     }
 
 
-def build_salt_config(experiment_config: ExperimentConfig) -> dict:
-    """Build the SALT config"""
+def build_salt_config(
+    experiment_config: ExperimentConfig, train_split_info: Dict, test_split_info: Dict
+) -> dict:
+    """Build the SALT config with dynamic splits"""
 
-    # Create YAML structure 
+    # Create YAML structure with dynamic dataset loading
     config_yaml = f"""
 pretrained_model: openai/whisper-large-v3
 num_workers: 12
@@ -172,24 +185,18 @@ training_args:
     push_to_hub: true
     hub_model_id: akera/{experiment_config.experiment_name}
     save_total_limit: 2
-    
 
 train:
     download_datasets_in_parallel: false
     huggingface_load:
-        - path: evie-8/kinyarwanda-speech-hackathon
+        - path: {experiment_config.dataset_name}
           name: {experiment_config.dataset_subset}
-          split: train
-          num_proc: 10
-        - path: evie-8/kinyarwanda-speech-hackathon
-          name: {experiment_config.dataset_subset}
-          split: train[:100]
+          split: {train_split_info['split']}
           num_proc: 10
     source:
       type: speech
-      language: [kin]
+      language: [{experiment_config.language_code}]
       preprocessing:
-        # preprocessing from SALT
         - set_sample_rate:
             rate: 8_000
             p: 0.05
@@ -208,22 +215,23 @@ train:
         - lower_case
         - clean_and_remove_punctuation:
             allowed_punctuation: "'"
-      language: [kin]
+      language: [{experiment_config.language_code}]
     shuffle: True
 
 validation:
     huggingface_load:
-        - path: jq/kinyarwanda-speech-hackathon
-          split: dev_test[:200]
+        - path: {experiment_config.dataset_name}
+          name: {experiment_config.dataset_subset}
+          split: {test_split_info['split']}
     source:
       type: speech
-      language: [kin]
+      language: [{experiment_config.language_code}]
       preprocessing:
         - set_sample_rate:
             rate: 16_000
     target:
       type: text
-      language: [kin]
+      language: [{experiment_config.language_code}]
       preprocessing:
         - lower_case
         - clean_and_remove_punctuation:
@@ -242,7 +250,7 @@ def load_experiment_config(config_path: str) -> ExperimentConfig:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train Whisper on Kinyarwanda speech data"
+        description="Train Whisper on multi-language speech data"
     )
     parser.add_argument(
         "--config", type=str, required=True, help="Path to experiment configuration"
@@ -256,9 +264,23 @@ def main():
 
     logger.info("=" * 60)
     logger.info(f"🎯 Experiment: {experiment_config.experiment_name}")
-    logger.info(f"📊 Dataset: {experiment_config.dataset_subset}")
+    logger.info(f"🌍 Language: {experiment_config.language_code}")
+    logger.info(
+        f"📊 Dataset: {experiment_config.dataset_name}/{experiment_config.dataset_subset}"
+    )
+    logger.info(f"⏰ Target hours: {experiment_config.target_hours}")
     logger.info(f"🎲 Seed: {experiment_config.seed}")
     logger.info("=" * 60)
+
+    # Create hour-based splits deterministically
+    logger.info("🔄 Creating hour-based splits...")
+    train_split_info, test_split_info = create_hour_based_splits(
+        dataset_name=experiment_config.dataset_name,
+        language_subset=experiment_config.dataset_subset,
+        target_hours=experiment_config.target_hours,
+        test_size=300,
+        seed=experiment_config.seed,
+    )
 
     # Setup logging
     setup_logging_backends(
@@ -267,8 +289,8 @@ def main():
         experiment_config.experiment_name,
     )
 
-    # Build SALT config
-    config = build_salt_config(experiment_config)
+    # Build SALT config with dynamic splits
+    config = build_salt_config(experiment_config, train_split_info, test_split_info)
 
     # Add timestamp to output directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -284,6 +306,12 @@ def main():
         yaml.dump(experiment_config.__dict__, f, default_flow_style=False)
     with open(os.path.join(output_dir, "full_config.yaml"), "w") as f:
         yaml.dump(config, f, default_flow_style=False)
+    with open(os.path.join(output_dir, "split_info.yaml"), "w") as f:
+        yaml.dump(
+            {"train": train_split_info, "test": test_split_info},
+            f,
+            default_flow_style=False,
+        )
 
     logger.info("📊 Creating datasets using SALT...")
 
@@ -291,21 +319,9 @@ def main():
     train_ds = salt.dataset.create(config["train"], verbose=True)
     valid_ds = salt.dataset.create(config["validation"])
 
-    logger.info("📚 Loading prompts dataset...")
-    # Load prompts
-    try:
-        ds_prompts = load_dataset(
-            "evie-8/kinyarwanda-speech-hackathon",
-            name=experiment_config.dataset_subset,
-            split="train",
-        )
-        text = list(ds_prompts["text"])
-        prompts = list(ds_prompts["prompt"])
-        sentence_to_prompt = {t: p for t, p in zip(text, prompts)}
-        logger.info(f"✅ Loaded {len(sentence_to_prompt)} prompts")
-    except Exception as e:
-        logger.warning(f"⚠️ Could not load prompts: {e}")
-        sentence_to_prompt = {}
+    # No prompts for the new dataset - keep it simple
+    sentence_to_prompt = {}
+    logger.info("ℹ️ No prompts dataset for new languages - skipping prompt loading")
 
     logger.info("🤖 Loading model and processor...")
     feature_extractor = transformers.WhisperFeatureExtractor.from_pretrained(
@@ -317,21 +333,33 @@ def main():
     model = transformers.WhisperForConditionalGeneration.from_pretrained(
         config["pretrained_model"],
         torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2"
+        attn_implementation="flash_attention_2",
     )
 
     logger.info("🔧 Preparing datasets...")
-    # Map datasets
+    # Map datasets with language-specific handling
     train_data = train_ds.map(
-        lambda x: prepare_dataset(x, sentence_to_prompt, feature_extractor, processor),
+        lambda x: prepare_dataset(
+            x,
+            sentence_to_prompt,
+            feature_extractor,
+            processor,
+            experiment_config.language_code,
+        ),
         remove_columns=["source", "target"],
     )
     val_data = valid_ds.map(
-        lambda x: prepare_dataset(x, sentence_to_prompt, feature_extractor, processor),
+        lambda x: prepare_dataset(
+            x,
+            sentence_to_prompt,
+            feature_extractor,
+            processor,
+            experiment_config.language_code,
+        ),
         remove_columns=["source", "target"],
     )
 
-    # Setup compute metrics 
+    # Setup compute metrics
     compute_metrics = salt.metrics.multilingual_eval_fn(
         valid_ds,
         [evaluate.load("wer"), evaluate.load("cer")],
@@ -376,29 +404,35 @@ def main():
         processing_class=processor,
     )
 
-    # log GPU name and VRAM to mlflow
-    gpu_name = torch.cuda.get_device_name(0)
-    vram_gb = round(torch.cuda.get_device_properties(0).total_memory / (1024**3), 2)
+    # Log GPU info
+    gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
+    vram_gb = (
+        round(torch.cuda.get_device_properties(0).total_memory / (1024**3), 2)
+        if torch.cuda.is_available()
+        else 0
+    )
 
     logger.info("🏃 Starting training...")
     trainer.train()
 
     logger.info("📝 Running final evaluation...")
     results = trainer.evaluate()
-    
 
     # Log to MLflow if enabled
     if experiment_config.use_mlflow:
         import mlflow
 
-
-
         mlflow.log_params(config)
         mlflow.log_param("experiment_type", "fine_tuning")
+        mlflow.log_param("language", experiment_config.language_code)
         mlflow.log_param("dataset_subset", experiment_config.dataset_subset)
-        
+        mlflow.log_param("target_hours", experiment_config.target_hours)
+        mlflow.log_param("actual_hours", train_split_info["actual_hours"])
+        mlflow.log_param("train_samples", len(train_split_info["indices"]))
+        mlflow.log_param("test_samples", test_split_info["size"])
         mlflow.log_param("gpu_name", gpu_name)
         mlflow.log_param("vram_gb", vram_gb)
+
         for key, value in results.items():
             if isinstance(value, (int, float)):
                 mlflow.log_metric(key, value)

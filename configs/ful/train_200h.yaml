@@ -1,0 +1,9 @@
+dataset_name: evie-8/afrivoices
+dataset_subset: ful
+experiment_name: whisper-large-v3-fulani-200h
+language_code: ful
+run_training: true
+seed: 42
+target_hours: 200
+use_mlflow: true
+use_wandb: false
