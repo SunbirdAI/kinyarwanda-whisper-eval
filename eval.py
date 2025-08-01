@@ -20,7 +20,7 @@ import mlflow
 from transformers import WhisperProcessor, WhisperForConditionalGeneration
 from tqdm import tqdm
 import salt.constants
-from data_utils import create_hour_based_splits, get_language_code_mapping
+from data_utils import create_and_save_hour_based_splits, get_language_code_mapping
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -47,7 +47,7 @@ def setup_mlflow(model_path: str):
         )
 
     os.environ["MLFLOW_EXPERIMENT_NAME"] = "whisper-multilingual-eval"
-    mlflow.set_tracking_uri("https://mlflow-sunbird-ce0ecfc14244.herokuapp.com/")
+    mlflow.set_tracking_uri("https://mlflow.sunbird.ai")
 
     run_name = "eval_" + os.path.basename(model_path)
     mlflow.start_run(run_name=run_name)
@@ -59,11 +59,13 @@ def load_validation_dataset(
     language_subset: str = "sna",
     seed: int = 42,
 ):
-    """Load validation dataset with dynamic split creation"""
+    """Load validation dataset using the same split creation logic as training"""
     logger.info(f"📊 Loading validation dataset for {language_subset}...")
 
     # Create test split (uses same logic as training to ensure consistency)
-    _, test_split_info = create_hour_based_splits(
+    from datasets import DatasetDict
+
+    _, test_split_info = create_and_save_hour_based_splits(
         dataset_name=dataset_name,
         language_subset=language_subset,
         target_hours=1.0,  # This doesn't matter for test split
@@ -71,10 +73,9 @@ def load_validation_dataset(
         seed=seed,
     )
 
-    # Load the test split
-    ds = datasets.load_dataset(
-        dataset_name, name=language_subset, split=test_split_info["split"]
-    )
+    # Load the DatasetDict and extract test split
+    dataset_dict = DatasetDict.load_from_disk(test_split_info["dataset_path"])
+    ds = dataset_dict["test"]
     ds = ds.cast_column("audio", datasets.Audio(sampling_rate=16_000))
 
     logger.info(f"✅ Loaded {len(ds)} samples for evaluation")
@@ -244,8 +245,8 @@ def main():
         logger.info(f"  Final Score: {results['final_score']:.4f}")
         logger.info("📝 Sample predictions:")
         for i in range(min(3, len(results["predictions"]))):
-            logger.info(f"    Label: {results['labels'][i]!r}")
-            logger.info(f"    Pred:  {results['predictions'][i]!r}")
+            logger.info(f"  Label: {results['labels'][i]!r}")
+            logger.info(f"  Pred:  {results['predictions'][i]!r}")
             logger.info("    ---")
 
         if not args.no_mlflow:

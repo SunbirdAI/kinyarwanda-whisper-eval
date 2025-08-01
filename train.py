@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 Multi-language Whisper fine-tuning script with dynamic hour-based splits.
-Usage: uv run python train.py --config configs/train_shona_1h.yaml
+Creates DatasetDict splits and loads with SALT - exactly like Kinyarwanda approach.
+
+Usage: uv run python train.py --config configs/sna/baseline.yaml
 """
 
 import argparse
@@ -20,7 +22,7 @@ from typing import Any, Dict, List, Union
 from datetime import datetime
 import logging
 from transformers import EarlyStoppingCallback
-from data_utils import create_hour_based_splits, get_language_code_mapping
+from data_utils import create_and_save_hour_based_splits, get_language_code_mapping
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -73,18 +75,6 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 
 def setup_logging_backends(use_wandb: bool, use_mlflow: bool, experiment_name: str):
     """Setup logging backends"""
-    if use_wandb:
-        try:
-            import wandb
-
-            os.environ["WANDB_LOG_MODEL"] = "True"
-            os.environ["WANDB_WATCH"] = "all"
-            wandb.login()
-            logger.info("✅ Weights & Biases initialized")
-        except ImportError:
-            logger.error("❌ wandb not installed")
-            raise
-
     if use_mlflow:
         try:
             import mlflow
@@ -97,9 +87,7 @@ def setup_logging_backends(use_wandb: bool, use_mlflow: bool, experiment_name: s
                 os.environ["MLFLOW_TRACKING_PASSWORD"] = getpass("MLFLOW password: ")
 
             os.environ["MLFLOW_EXPERIMENT_NAME"] = "whisper-multilingual-eval"
-            mlflow.set_tracking_uri(
-                "https://mlflow-sunbird-ce0ecfc14244.herokuapp.com/"
-            )
+            mlflow.set_tracking_uri("https://mlflow.sunbird.ai")
             mlflow.system_metrics.enable_system_metrics_logging()
             mlflow.start_run(run_name=experiment_name)
             logger.info("✅ MLflow initialized")
@@ -150,11 +138,47 @@ def prepare_dataset(
 
 
 def build_salt_config(
-    experiment_config: ExperimentConfig, train_split_info: Dict, test_split_info: Dict
+    experiment_config: ExperimentConfig, dataset_path: str, has_train_data: bool = True
 ) -> dict:
-    """Build the SALT config with dynamic splits"""
+    """Build the SALT config with path to saved DatasetDict"""
 
-    # Create YAML structure with dynamic dataset loading
+    # Only include train config if we have training data
+    if has_train_data:
+        train_config = f"""
+train:
+    download_datasets_in_parallel: false
+    huggingface_load:
+        - path: {dataset_path}
+          split: train
+          num_proc: 10
+    source:
+      type: speech
+      language: [{experiment_config.language_code}]
+      preprocessing:
+        - set_sample_rate:
+            rate: 8_000
+            p: 0.05
+        - set_sample_rate:
+            rate: 16_000
+        - normalize_audio
+        - augment_audio_speed:
+            p: 0.2
+            low: 0.95
+            high: 1.15
+        - augment_audio_noise:
+            max_relative_amplitude: 0.3
+    target:
+      type: text
+      preprocessing:
+        - lower_case
+        - clean_and_remove_punctuation:
+            allowed_punctuation: "'"
+      language: [{experiment_config.language_code}]
+    shuffle: True
+"""
+    else:
+        train_config = ""
+
     config_yaml = f"""
 pretrained_model: openai/whisper-large-v3
 num_workers: 12
@@ -185,44 +209,11 @@ training_args:
     push_to_hub: true
     hub_model_id: akera/{experiment_config.experiment_name}
     save_total_limit: 2
-
-train:
-    download_datasets_in_parallel: false
-    huggingface_load:
-        - path: {experiment_config.dataset_name}
-          name: {experiment_config.dataset_subset}
-          split: {train_split_info['split']}
-          num_proc: 10
-    source:
-      type: speech
-      language: [{experiment_config.language_code}]
-      preprocessing:
-        - set_sample_rate:
-            rate: 8_000
-            p: 0.05
-        - set_sample_rate:
-            rate: 16_000
-        - normalize_audio
-        - augment_audio_speed:
-            p: 0.2
-            low: 0.95
-            high: 1.15
-        - augment_audio_noise:
-            max_relative_amplitude: 0.3
-    target:
-      type: text
-      preprocessing:
-        - lower_case
-        - clean_and_remove_punctuation:
-            allowed_punctuation: "'"
-      language: [{experiment_config.language_code}]
-    shuffle: True
-
+{train_config}
 validation:
     huggingface_load:
-        - path: {experiment_config.dataset_name}
-          name: {experiment_config.dataset_subset}
-          split: {test_split_info['split']}
+        - path: {dataset_path}
+          split: test
     source:
       type: speech
       language: [{experiment_config.language_code}]
@@ -255,6 +246,11 @@ def main():
     parser.add_argument(
         "--config", type=str, required=True, help="Path to experiment configuration"
     )
+    parser.add_argument(
+        "--force-recreate",
+        action="store_true",
+        help="Force recreation of cached splits",
+    )
     args = parser.parse_args()
 
     # Load configuration
@@ -268,19 +264,49 @@ def main():
     logger.info(
         f"📊 Dataset: {experiment_config.dataset_name}/{experiment_config.dataset_subset}"
     )
-    logger.info(f"⏰ Target hours: {experiment_config.target_hours}")
+    if experiment_config.run_training:
+        logger.info(f"⏰ Target hours: {experiment_config.target_hours}")
+    else:
+        logger.info("📝 Mode: Baseline evaluation (no training)")
     logger.info(f"🎲 Seed: {experiment_config.seed}")
     logger.info("=" * 60)
 
-    # Create hour-based splits deterministically
-    logger.info("🔄 Creating hour-based splits...")
-    train_split_info, test_split_info = create_hour_based_splits(
-        dataset_name=experiment_config.dataset_name,
-        language_subset=experiment_config.dataset_subset,
-        target_hours=experiment_config.target_hours,
-        test_size=300,
-        seed=experiment_config.seed,
-    )
+    # Create and save hour-based splits as DatasetDict (like Kinyarwanda pre-existing subsets)
+    if experiment_config.run_training:
+        logger.info("🔄 Creating and saving hour-based splits...")
+        train_split_info, test_split_info = create_and_save_hour_based_splits(
+            dataset_name=experiment_config.dataset_name,
+            language_subset=experiment_config.dataset_subset,
+            target_hours=experiment_config.target_hours,
+            test_size=300,
+            seed=experiment_config.seed,
+            force_recreate=args.force_recreate,
+        )
+    else:
+        # For baseline evaluation, create empty training split and normal test split
+        logger.info("🔄 Creating test split for baseline evaluation...")
+        train_split_info, test_split_info = create_and_save_hour_based_splits(
+            dataset_name=experiment_config.dataset_name,
+            language_subset=experiment_config.dataset_subset,
+            target_hours=0.0,  # Empty training split
+            test_size=300,
+            seed=experiment_config.seed,
+            force_recreate=args.force_recreate,
+        )
+
+    if train_split_info["is_cached"]:
+        logger.info(
+            f"✅ Using cached splits: {train_split_info['num_samples']} train, {test_split_info['num_samples']} test"
+        )
+    else:
+        if experiment_config.run_training:
+            logger.info(
+                f"✅ Created new splits: {train_split_info['num_samples']} train ({train_split_info['actual_hours']:.2f}h), {test_split_info['num_samples']} test"
+            )
+        else:
+            logger.info(
+                f"✅ Created baseline test split: {test_split_info['num_samples']} samples"
+            )
 
     # Setup logging
     setup_logging_backends(
@@ -289,8 +315,11 @@ def main():
         experiment_config.experiment_name,
     )
 
-    # Build SALT config with dynamic splits
-    config = build_salt_config(experiment_config, train_split_info, test_split_info)
+    # Build SALT config with path to saved DatasetDict (exactly like Kinyarwanda)
+    has_train_data = train_split_info["num_samples"] > 0
+    config = build_salt_config(
+        experiment_config, train_split_info["dataset_path"], has_train_data
+    )
 
     # Add timestamp to output directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -313,11 +342,18 @@ def main():
             default_flow_style=False,
         )
 
+    # Create datasets using SALT (normal IterableDatasets - exactly like Kinyarwanda)
     logger.info("📊 Creating datasets using SALT...")
 
-    # Create datasets using SALT
-    train_ds = salt.dataset.create(config["train"], verbose=True)
+    if experiment_config.run_training and has_train_data:
+        train_ds = salt.dataset.create(config["train"], verbose=True)
+        logger.info("✅ Training dataset created: IterableDataset")
+    else:
+        train_ds = None
+        logger.info("✅ No training dataset (baseline mode or empty split)")
+
     valid_ds = salt.dataset.create(config["validation"])
+    logger.info("✅ Validation dataset created: IterableDataset")
 
     # No prompts for the new dataset - keep it simple
     sentence_to_prompt = {}
@@ -337,17 +373,21 @@ def main():
     )
 
     logger.info("🔧 Preparing datasets...")
-    # Map datasets with language-specific handling
-    train_data = train_ds.map(
-        lambda x: prepare_dataset(
-            x,
-            sentence_to_prompt,
-            feature_extractor,
-            processor,
-            experiment_config.language_code,
-        ),
-        remove_columns=["source", "target"],
-    )
+    # Map datasets with language-specific handling (normal processing - just like Kinyarwanda)
+    if train_ds is not None:
+        train_data = train_ds.map(
+            lambda x: prepare_dataset(
+                x,
+                sentence_to_prompt,
+                feature_extractor,
+                processor,
+                experiment_config.language_code,
+            ),
+            remove_columns=["source", "target"],
+        )
+    else:
+        train_data = None
+
     val_data = valid_ds.map(
         lambda x: prepare_dataset(
             x,
@@ -359,14 +399,33 @@ def main():
         remove_columns=["source", "target"],
     )
 
-    # Setup compute metrics
-    compute_metrics = salt.metrics.multilingual_eval_fn(
-        valid_ds,
-        [evaluate.load("wer"), evaluate.load("cer")],
-        processor.tokenizer,
-        log_first_N_predictions=3,
-        speech_processor=processor,
-    )
+    # Setup compute metrics - simple version that works with our data structure
+    def compute_metrics(eval_pred):
+        predictions, labels = eval_pred
+
+        # Decode predictions
+        decoded_preds = processor.batch_decode(predictions, skip_special_tokens=True)
+
+        # Replace -100 in the labels as we can't decode them
+        labels = np.where(labels != -100, labels, processor.tokenizer.pad_token_id)
+        decoded_labels = processor.batch_decode(labels, skip_special_tokens=True)
+
+        # Normalize text for evaluation
+        normalized_preds = [pred.strip().lower() for pred in decoded_preds]
+        normalized_labels = [label.strip().lower() for label in decoded_labels]
+
+        # Compute WER and CER
+        wer_metric = evaluate.load("wer")
+        cer_metric = evaluate.load("cer")
+
+        wer = wer_metric.compute(
+            predictions=normalized_preds, references=normalized_labels
+        )
+        cer = cer_metric.compute(
+            predictions=normalized_preds, references=normalized_labels
+        )
+
+        return {"wer": wer, "cer": cer, "score": 1.0 - (0.6 * cer + 0.4 * wer)}
 
     # Model configuration
     model.config.suppress_tokens = []
@@ -396,11 +455,15 @@ def main():
     trainer = transformers.Seq2SeqTrainer(
         args=training_args,
         model=model,
-        train_dataset=train_data,
+        train_dataset=train_data,  # Will be None for baseline evaluation
         eval_dataset=val_data,
         data_collator=data_collator,
         compute_metrics=compute_metrics,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=10)],
+        callbacks=(
+            [EarlyStoppingCallback(early_stopping_patience=10)]
+            if experiment_config.run_training
+            else []
+        ),
         processing_class=processor,
     )
 
@@ -412,26 +475,41 @@ def main():
         else 0
     )
 
-    logger.info("🏃 Starting training...")
-    trainer.train()
-
-    logger.info("📝 Running final evaluation...")
-    results = trainer.evaluate()
+    if experiment_config.run_training:
+        logger.info("🏃 Starting training...")
+        trainer.train()
+        logger.info("📝 Running final evaluation...")
+        results = trainer.evaluate()
+    else:
+        logger.info("📝 Running baseline evaluation (no training)...")
+        results = trainer.evaluate()
 
     # Log to MLflow if enabled
     if experiment_config.use_mlflow:
         import mlflow
 
         mlflow.log_params(config)
-        mlflow.log_param("experiment_type", "fine_tuning")
+        experiment_type = (
+            "baseline_evaluation"
+            if not experiment_config.run_training
+            else "fine_tuning"
+        )
+        mlflow.log_param("experiment_type", experiment_type)
         mlflow.log_param("language", experiment_config.language_code)
         mlflow.log_param("dataset_subset", experiment_config.dataset_subset)
-        mlflow.log_param("target_hours", experiment_config.target_hours)
-        mlflow.log_param("actual_hours", train_split_info["actual_hours"])
-        mlflow.log_param("train_samples", len(train_split_info["indices"]))
-        mlflow.log_param("test_samples", test_split_info["size"])
         mlflow.log_param("gpu_name", gpu_name)
         mlflow.log_param("vram_gb", vram_gb)
+
+        if experiment_config.run_training:
+            mlflow.log_param("target_hours", experiment_config.target_hours)
+            mlflow.log_param("actual_hours", train_split_info.get("actual_hours", 0))
+            mlflow.log_param("train_samples", train_split_info.get("num_samples", 0))
+        else:
+            mlflow.log_param("target_hours", 0)
+            mlflow.log_param("actual_hours", 0)
+            mlflow.log_param("train_samples", 0)
+
+        mlflow.log_param("test_samples", test_split_info.get("num_samples", 0))
 
         for key, value in results.items():
             if isinstance(value, (int, float)):
