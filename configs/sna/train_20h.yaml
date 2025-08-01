@@ -1,9 +1,9 @@
 dataset_name: evie-8/afrivoices
 dataset_subset: sna
-experiment_name: whisper-large-v3-shona-500h
+experiment_name: whisper-large-v3-shona-20h
 language_code: sna
 run_training: true
 seed: 42
-target_hours: 500
+target_hours: 20
 use_mlflow: true
 use_wandb: false

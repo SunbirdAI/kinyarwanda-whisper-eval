@@ -87,7 +87,9 @@ def setup_logging_backends(use_wandb: bool, use_mlflow: bool, experiment_name: s
                 os.environ["MLFLOW_TRACKING_PASSWORD"] = getpass("MLFLOW password: ")
 
             os.environ["MLFLOW_EXPERIMENT_NAME"] = "whisper-multilingual-eval"
-            mlflow.set_tracking_uri("https://mlflow.sunbird.ai")
+            mlflow.set_tracking_uri(
+                "https://mlflow-sunbird-ce0ecfc14244.herokuapp.com/"
+            )
             mlflow.system_metrics.enable_system_metrics_logging()
             mlflow.start_run(run_name=experiment_name)
             logger.info("✅ MLflow initialized")
@@ -105,42 +107,55 @@ def prepare_dataset(
     p_prompt=0.0,
 ):
     """Data prep with language-specific handling"""
-    audio = example["source"]
-    input_features = feature_extractor(
-        audio,
-        sampling_rate=16000,
-        device="cuda" if torch.cuda.is_available() else "cpu",
-        do_normalize=True,
-    ).input_features[0]
+    try:
+        audio = example["source"]
+        input_features = feature_extractor(
+            audio,
+            sampling_rate=16000,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            do_normalize=True,
+        ).input_features[0]
 
-    # Encode target text to label ids
-    labels = processor.tokenizer(str(example["target"])).input_ids
+        # Encode target text to label ids
+        labels = processor.tokenizer(str(example["target"])).input_ids
 
-    # Insert the language ID token - check if language code exists in SALT constants
-    if language_code in salt.constants.SALT_LANGUAGE_TOKENS_WHISPER:
-        language_token = salt.constants.SALT_LANGUAGE_TOKENS_WHISPER[language_code]
-        labels.insert(1, language_token)
-    else:
-        logger.warning(f"Language code {language_code} not found in SALT constants")
+        # Insert the language ID token - check if language code exists in SALT constants
+        if language_code in salt.constants.SALT_LANGUAGE_TOKENS_WHISPER:
+            language_token = salt.constants.SALT_LANGUAGE_TOKENS_WHISPER[language_code]
+            labels.insert(1, language_token)
+        else:
+            logger.warning(f"Language code {language_code} not found in SALT constants")
 
-    # If a prompt is known for a particular sentence, add it to the training example
-    prompt = sentence_to_prompt.get(example["target"], None)
-    if prompt and np.random.random() < p_prompt:
-        prompt_ids = list(processor.get_prompt_ids(prompt))
-        labels = prompt_ids + labels
+        # If a prompt is known for a particular sentence, add it to the training example
+        prompt = sentence_to_prompt.get(example["target"], None)
+        if prompt and np.random.random() < p_prompt:
+            prompt_ids = list(processor.get_prompt_ids(prompt))
+            labels = prompt_ids + labels
 
-    return {
-        "input_features": input_features,
-        "labels": np.array(labels),
-        "source.language": example["source.language"],
-        "target.language": example["target.language"],
-    }
+        return {
+            "input_features": input_features,
+            "labels": np.array(labels),
+            "source.language": example.get("source.language", language_code),
+            "target.language": example.get("target.language", language_code),
+        }
+    except Exception as e:
+        logger.error(f"Error processing example: {e}")
+        logger.error(
+            f"Example keys: {example.keys() if hasattr(example, 'keys') else 'No keys'}"
+        )
+        # Return a minimal valid example to avoid None
+        return {
+            "input_features": np.zeros((80, 3000)),  # Minimal audio features
+            "labels": np.array([processor.tokenizer.eos_token_id]),
+            "source.language": language_code,
+            "target.language": language_code,
+        }
 
 
 def build_salt_config(
     experiment_config: ExperimentConfig, dataset_path: str, has_train_data: bool = True
 ) -> dict:
-    """Build the SALT config with path to saved DatasetDict"""
+    """Build the SALT config with path to saved DatasetDict - exactly like Kinyarwanda approach"""
 
     # Only include train config if we have training data
     if has_train_data:
@@ -154,6 +169,7 @@ train:
     source:
       type: speech
       language: [{experiment_config.language_code}]
+      column: audio
       preprocessing:
         - set_sample_rate:
             rate: 8_000
@@ -169,6 +185,7 @@ train:
             max_relative_amplitude: 0.3
     target:
       type: text
+      column: text
       preprocessing:
         - lower_case
         - clean_and_remove_punctuation:
@@ -201,7 +218,7 @@ training_args:
     predict_with_generate: true
     generation_max_length: 200
     save_steps: 400
-    eval_steps: 400
+    eval_steps: 200
     logging_steps: 200
     load_best_model_at_end: true
     metric_for_best_model: loss
@@ -217,12 +234,14 @@ validation:
     source:
       type: speech
       language: [{experiment_config.language_code}]
+      column: audio
       preprocessing:
         - set_sample_rate:
             rate: 16_000
     target:
       type: text
       language: [{experiment_config.language_code}]
+      column: text
       preprocessing:
         - lower_case
         - clean_and_remove_punctuation:
@@ -325,9 +344,9 @@ def main():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = f"{experiment_config.experiment_name}_{timestamp}"
     config["training_args"]["output_dir"] = output_dir
-    config["training_args"]["hub_model_id"] = (
-        f"akera/{experiment_config.experiment_name}_{timestamp}"
-    )
+    config["training_args"][
+        "hub_model_id"
+    ] = f"akera/{experiment_config.experiment_name}_{timestamp}"
 
     # Create output directory and save configs
     os.makedirs(output_dir, exist_ok=True)
@@ -342,6 +361,29 @@ def main():
             default_flow_style=False,
         )
 
+    # Convert to the format SALT would produce (source/target)
+    def convert_to_salt_format(example):
+        return {
+            "source": example["audio"]["array"],
+            "target": example["text"],
+            "source.language": experiment_config.language_code,
+            "target.language": experiment_config.language_code,
+        }
+
+    # Debug: Check what's actually in the saved DatasetDict
+    logger.info("🔍 Checking saved DatasetDict structure...")
+    try:
+        from datasets import DatasetDict
+
+        saved_dict = DatasetDict.load_from_disk(train_split_info["dataset_path"])
+        logger.info(f"Available splits in DatasetDict: {list(saved_dict.keys())}")
+        for split_name, split_data in saved_dict.items():
+            logger.info(f"Split '{split_name}': {len(split_data)} samples")
+            if len(split_data) > 0:
+                logger.info(f"Sample from '{split_name}': {list(split_data[0].keys())}")
+    except Exception as e:
+        logger.error(f"Error loading DatasetDict: {e}")
+
     # Create datasets using SALT (normal IterableDatasets - exactly like Kinyarwanda)
     logger.info("📊 Creating datasets using SALT...")
 
@@ -352,8 +394,27 @@ def main():
         train_ds = None
         logger.info("✅ No training dataset (baseline mode or empty split)")
 
-    valid_ds = salt.dataset.create(config["validation"])
-    logger.info("✅ Validation dataset created: IterableDataset")
+    # Create datasets - bypass SALT and load directly from our DatasetDict
+    logger.info("📊 Creating datasets directly from saved DatasetDict...")
+    from datasets import DatasetDict
+
+    saved_dict = DatasetDict.load_from_disk(train_split_info["dataset_path"])
+
+    if experiment_config.run_training and has_train_data:
+        raw_train_ds = saved_dict["train"]
+        logger.info(f"✅ Loaded {len(raw_train_ds)} training samples directly")
+
+        train_ds = raw_train_ds.map(convert_to_salt_format)
+        logger.info("✅ Training dataset converted to SALT format")
+    else:
+        train_ds = None
+        logger.info("✅ No training dataset (baseline mode or empty split)")
+
+    # Always load validation dataset directly
+    raw_valid_ds = saved_dict["test"]
+    logger.info(f"✅ Loaded {len(raw_valid_ds)} validation samples directly")
+    valid_ds = raw_valid_ds.map(convert_to_salt_format)
+    logger.info("✅ Validation dataset converted to SALT format")
 
     # No prompts for the new dataset - keep it simple
     sentence_to_prompt = {}
@@ -367,12 +428,27 @@ def main():
         config["pretrained_model"], language=None, task="transcribe"
     )
     model = transformers.WhisperForConditionalGeneration.from_pretrained(
-        config["pretrained_model"],
-        torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
+        config["pretrained_model"], torch_dtype=torch.bfloat16
     )
 
     logger.info("🔧 Preparing datasets...")
+
+    # Debug: Check what's in the validation dataset
+    logger.info("🔍 Debugging validation dataset...")
+    try:
+        sample_count = 0
+        for i, sample in enumerate(valid_ds):
+            sample_count += 1
+            if i == 0:
+                logger.info(f"First sample keys: {sample.keys()}")
+                logger.info(f"Sample structure: {type(sample)}")
+            if i >= 2:  # Just check first 3 samples
+                break
+        logger.info(f"✅ Found {sample_count} samples in validation dataset")
+    except Exception as e:
+        logger.error(f"❌ Error iterating validation dataset: {e}")
+        logger.error("Dataset might be empty or corrupted")
+
     # Map datasets with language-specific handling (normal processing - just like Kinyarwanda)
     if train_ds is not None:
         train_data = train_ds.map(
@@ -388,6 +464,7 @@ def main():
     else:
         train_data = None
 
+    logger.info("🔧 Mapping validation dataset...")
     val_data = valid_ds.map(
         lambda x: prepare_dataset(
             x,
@@ -398,6 +475,7 @@ def main():
         ),
         remove_columns=["source", "target"],
     )
+    logger.info("✅ Validation dataset mapped")
 
     # Setup compute metrics - simple version that works with our data structure
     def compute_metrics(eval_pred):

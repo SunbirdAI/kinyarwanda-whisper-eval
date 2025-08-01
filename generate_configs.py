@@ -28,7 +28,8 @@ LANGUAGES = {
 }
 
 # Hour targets to generate configs for
-HOUR_TARGETS = [1, 10, 50, 100, 150, 200, 500]
+HOUR_TARGETS = [1, 5, 10, 20, 50, 100]
+
 
 # Base configuration template
 BASE_CONFIG = {
