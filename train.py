@@ -92,7 +92,7 @@ def setup_logging_backends(use_wandb: bool, use_mlflow: bool, experiment_name: s
             if "MLFLOW_TRACKING_PASSWORD" not in os.environ:
                 os.environ["MLFLOW_TRACKING_PASSWORD"] = getpass("MLFLOW password: ")
 
-            os.environ["MLFLOW_EXPERIMENT_NAME"] = "whisper-kinyarwanda-eval"
+            os.environ["MLFLOW_EXPERIMENT_NAME"] = "whisper-kikuyu-eval"
             mlflow.set_tracking_uri(
                 "https://mlflow-sunbird-ce0ecfc14244.herokuapp.com/"
             )
@@ -130,6 +130,8 @@ def prepare_dataset(
         prompt_ids = list(processor.get_prompt_ids(prompt))
         labels = prompt_ids + labels
 
+    labels = labels[:448]
+
     return {
         "input_features": input_features,
         "labels": np.array(labels),
@@ -149,8 +151,8 @@ use_peft: false
 
 training_args:
     output_dir: {experiment_config.experiment_name}
-    per_device_train_batch_size: 16
-    per_device_eval_batch_size: 16
+    per_device_train_batch_size: 8
+    per_device_eval_batch_size: 8
     dataloader_pin_memory: true
     gradient_accumulation_steps: 2
     learning_rate: 1.0e-5
@@ -177,17 +179,17 @@ training_args:
 train:
     download_datasets_in_parallel: false
     huggingface_load:
-        - path: evie-8/kinyarwanda-speech-hackathon
+        - path: evie-8/kikuyu-data
           name: {experiment_config.dataset_subset}
           split: train
           num_proc: 10
-        - path: evie-8/kinyarwanda-speech-hackathon
+        - path: evie-8/kikuyu-data
           name: {experiment_config.dataset_subset}
           split: train[:100]
           num_proc: 10
     source:
       type: speech
-      language: [kin]
+      language: [kik]
       preprocessing:
         # preprocessing from SALT
         - set_sample_rate:
@@ -208,22 +210,23 @@ train:
         - lower_case
         - clean_and_remove_punctuation:
             allowed_punctuation: "'"
-      language: [kin]
+      language: [kik]
     shuffle: True
 
 validation:
     huggingface_load:
-        - path: jq/kinyarwanda-speech-hackathon
-          split: dev_test[:200]
+        - path: evie-8/kikuyu-data
+          name: {experiment_config.dataset_subset}
+          split: dev_test
     source:
       type: speech
-      language: [kin]
+      language: [kik]
       preprocessing:
         - set_sample_rate:
             rate: 16_000
     target:
       type: text
-      language: [kin]
+      language: [kik]
       preprocessing:
         - lower_case
         - clean_and_remove_punctuation:
@@ -295,7 +298,7 @@ def main():
     # Load prompts
     try:
         ds_prompts = load_dataset(
-            "evie-8/kinyarwanda-speech-hackathon",
+            "evie-8/kikuyu-data",
             name=experiment_config.dataset_subset,
             split="train",
         )
@@ -316,8 +319,7 @@ def main():
     )
     model = transformers.WhisperForConditionalGeneration.from_pretrained(
         config["pretrained_model"],
-        torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2"
+        torch_dtype=torch.bfloat16
     )
 
     logger.info("🔧 Preparing datasets...")
