@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Kikuyu Whisper fine-tuning script.
+Swahili Whisper fine-tuning script.
 Usage:
   uv run python train.py --config configs/train_32h.yaml
   uv run python train.py --config configs/train_1h.yaml
@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ExperimentConfig:
     experiment_name: str
-    dataset_subset: str = "audio_50h"
+    dataset_path: str = "evie-8/swahili-speech-data"
     train_duration_hours: Optional[float] = None  # None => use full split
     use_wandb: bool = False
     use_mlflow: bool = True
@@ -102,7 +102,7 @@ def setup_logging_backends(use_wandb: bool, use_mlflow: bool, experiment_name: s
             if "MLFLOW_TRACKING_PASSWORD" not in os.environ:
                 os.environ["MLFLOW_TRACKING_PASSWORD"] = getpass("MLFLOW password: ")
 
-            os.environ["MLFLOW_EXPERIMENT_NAME"] = "whisper-kikuyu-eval"
+            os.environ["MLFLOW_EXPERIMENT_NAME"] = "whisper-swahili-eval"
             mlflow.set_tracking_uri(
                 "https://mlflow-sunbird-ce0ecfc14244.herokuapp.com/"
             )
@@ -169,13 +169,27 @@ def build_duration_subset(
     Deterministically materialize a finite N-hour slice from a streaming SALT dataset.
     Returns a map-style HF Dataset so Trainer can do multiple epochs w/o re-opening shards.
     """
+
+    # Safety clamp: avoid huge RAM usage on large datasets
+    try:
+        total_rows = len(base_iterable_ds)
+    except TypeError:
+        total_rows = None  # streaming datasets may not support len()
+
+    if total_rows:
+        shuffle_buffer = min(shuffle_buffer, total_rows, 5000)
+    else:
+        shuffle_buffer = min(shuffle_buffer, 5000)
+
+    logger.info(f"🔄 Shuffle buffer set to {shuffle_buffer} (total rows: {total_rows})")
+
     # Buffered deterministic shuffle on the iterable
     shuffled = base_iterable_ds.shuffle(seed=seed, buffer_size=shuffle_buffer)
 
     limit_seconds = int(limit_hours * 3600)
     current_seconds = 0
 
-    # RNG for prompt decision; swap to hash(text) if you want per-sample determinism
+    # fixed RNG for prompt decision; swap to hash(text) if you want per-sample determinism
     rng = np.random.RandomState(seed)
 
     def _gen():
@@ -188,6 +202,7 @@ def build_duration_subset(
             if current_seconds > 0 and current_seconds + dur > limit_seconds:
                 break
 
+            # --- same preprocessing as prepare_dataset, inlined for speed ---
             audio = ex["source"]
             input_features = feature_extractor(
                 audio,
@@ -264,17 +279,15 @@ training_args:
 train:
     download_datasets_in_parallel: false
     huggingface_load:
-        - path: evie-8/kikuyu-data
-          name: {experiment_config.dataset_subset}
+        - path: {experiment_config.dataset_path}
           split: train
           num_proc: 10
-        - path: evie-8/kikuyu-data
-          name: {experiment_config.dataset_subset}
+        - path: {experiment_config.dataset_path}
           split: train[:100]
           num_proc: 10
     source:
       type: speech
-      language: [kik]
+      language: [swa]
       preprocessing:
         - set_sample_rate:
             rate: 8_000
@@ -294,23 +307,22 @@ train:
         - lower_case
         - clean_and_remove_punctuation:
             allowed_punctuation: "'"
-      language: [kik]
+      language: [swa]
     shuffle: True
 
 validation:
     huggingface_load:
-        - path: evie-8/kikuyu-data
-          name: {experiment_config.dataset_subset}
+        - path: {experiment_config.dataset_path}
           split: dev_test
     source:
       type: speech
-      language: [kik]
+      language: [swa]
       preprocessing:
         - set_sample_rate:
             rate: 16_000
     target:
       type: text
-      language: [kik]
+      language: [swa]
       preprocessing:
         - lower_case
         - clean_and_remove_punctuation:
@@ -329,7 +341,9 @@ def load_experiment_config(config_path: str) -> ExperimentConfig:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train Whisper on Kikuyu speech data")
+    parser = argparse.ArgumentParser(
+        description="Train Whisper on Kinyarwanda speech data"
+    )
     parser.add_argument(
         "--config", type=str, required=True, help="Path to experiment configuration"
     )
@@ -342,7 +356,7 @@ def main():
 
     logger.info("=" * 60)
     logger.info(f"🎯 Experiment: {experiment_config.experiment_name}")
-    logger.info(f"📊 Dataset: {experiment_config.dataset_subset}")
+    logger.info(f"📊 Dataset: {experiment_config.dataset_path}")
     logger.info(f"🎲 Seed: {experiment_config.seed}")
     if experiment_config.train_duration_hours is not None:
         logger.info(
@@ -381,11 +395,8 @@ def main():
 
     logger.info("📚 Loading prompts dataset...")
     try:
-        ds_prompts = load_dataset(
-            "evie-8/kikuyu-data",
-            name=experiment_config.dataset_subset,
-            split="train",
-        )
+        ds_prompts = load_dataset(experiment_config.dataset_path, split="train")
+
         sentence_to_prompt = {
             t: p for t, p in zip(ds_prompts["text"], ds_prompts["prompt"])
         }
@@ -413,6 +424,14 @@ def main():
         logger.info(
             f"🎯 Building ~{experiment_config.train_duration_hours}h deterministic subset"
         )
+        try:
+            total_rows = len(train_ds_raw)
+        except TypeError:
+            total_rows = None
+
+        shuffle_buffer = min(5000, total_rows) if total_rows else 5000
+        logger.info(f"🔄 Using shuffle buffer size: {shuffle_buffer}")
+
         train_data = build_duration_subset(
             base_iterable_ds=train_ds_raw,
             limit_hours=experiment_config.train_duration_hours,
@@ -421,7 +440,7 @@ def main():
             feature_extractor=feature_extractor,
             processor=processor,
             target_sr=16000,
-            shuffle_buffer=100_000,
+            shuffle_buffer=shuffle_buffer,
             p_prompt=0.0,
         )
         val_data = valid_ds_raw.map(
@@ -513,7 +532,6 @@ def main():
 
         # Log flattened training args/config selectively (avoid huge nested dump)
         mlflow.log_param("experiment_name", experiment_config.experiment_name)
-        mlflow.log_param("dataset_subset", experiment_config.dataset_subset)
         if experiment_config.train_duration_hours is not None:
             mlflow.log_param(
                 "train_duration_hours", experiment_config.train_duration_hours

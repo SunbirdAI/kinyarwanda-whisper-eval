@@ -1,0 +1,6 @@
+experiment_name: "swa-20h"
+dataset_path: "evie-8/swahili-speech-data"
+train_duration_hours: 20
+use_wandb: false
+use_mlflow: true
+seed: 42

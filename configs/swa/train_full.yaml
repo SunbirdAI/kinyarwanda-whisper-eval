@@ -1,0 +1,5 @@
+experiment_name: "swa-full"
+dataset_path: "evie-8/swahili-speech-data"
+use_wandb: false
+use_mlflow: true
+seed: 42
