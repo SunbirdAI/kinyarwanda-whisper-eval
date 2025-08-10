@@ -1,0 +1,7 @@
+# Baseline configuration - No training, just evaluation of base Whisper model
+experiment_name: "baseline_whisper_eval"
+run_training: false
+dataset_subset: "baseline"
+use_wandb: false
+use_mlflow: true
+seed: 42

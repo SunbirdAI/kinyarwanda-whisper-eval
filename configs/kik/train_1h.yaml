@@ -1,0 +1,6 @@
+experiment_name: "whisper-large-v3-kik-1h"
+dataset_subset: "duration_30s"
+train_duration_hours: 1
+use_wandb: false
+use_mlflow: true
+seed: 42
