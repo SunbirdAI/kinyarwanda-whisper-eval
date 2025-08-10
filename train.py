@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Swahili Whisper fine-tuning script.
+Kikuyu Whisper fine-tuning script.
 Usage:
   uv run python train.py --config configs/train_32h.yaml
   uv run python train.py --config configs/train_1h.yaml
@@ -329,7 +329,7 @@ def load_experiment_config(config_path: str) -> ExperimentConfig:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train Whisper on Swahili speech data")
+    parser = argparse.ArgumentParser(description="Train Whisper on Kikuyu speech data")
     parser.add_argument(
         "--config", type=str, required=True, help="Path to experiment configuration"
     )
