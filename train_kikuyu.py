@@ -117,6 +117,23 @@ def setup_logging_backends(use_wandb: bool, use_mlflow: bool, experiment_name: s
 # ----------------------------
 # Preprocessing
 # ----------------------------
+
+
+import re
+
+# Remove anything in square brackets: [pause], [inaudible], [eehh], [uhhh], [cs], etc.
+_BRACKET_TAG_RE = re.compile(r"\[[^\]]*\]")
+_WS_RE = re.compile(r"\s+")
+
+def clean_transcript(text: str) -> str:
+    # Do not mutate example["target"] upstream; just return a cleaned view
+    text = _BRACKET_TAG_RE.sub(" ", str(text))   # drop bracketed tags
+    text = _WS_RE.sub(" ", text).strip()         # collapse whitespace
+    return text
+
+
+
+
 def prepare_dataset(
     example, sentence_to_prompt, feature_extractor, processor, p_prompt: float = 0.0
 ):
@@ -129,8 +146,12 @@ def prepare_dataset(
         do_normalize=True,
     ).input_features[0]
 
+    raw_text = str(example["target"])
+    clean_text = clean_transcript(raw_text)
+    labels = processor.tokenizer(clean_text).input_ids
+
     # Encode target text to label ids
-    labels = processor.tokenizer(str(example["target"])).input_ids
+    # labels = processor.tokenizer(str(example["target"])).input_ids
 
     # Insert language ID token at position 1
     labels.insert(
@@ -197,7 +218,12 @@ def build_duration_subset(
                 do_normalize=True,
             ).input_features[0]
 
-            labels = processor.tokenizer(str(ex["target"])).input_ids
+            # Clean, then tokenize
+            raw_text = str(ex["target"])
+            clean_text = clean_transcript(raw_text)
+            labels = processor.tokenizer(clean_text).input_ids
+            
+
             labels.insert(
                 1, salt.constants.SALT_LANGUAGE_TOKENS_WHISPER[ex["target.language"]]
             )
@@ -265,12 +291,12 @@ training_args:
 train:
     download_datasets_in_parallel: false
     huggingface_load:
-        - path: evie-8/kikuyu-data
-          name: {experiment_config.dataset_subset}
+        - path: jq/kikuyu-data-segmented
+          # name: {experiment_config.dataset_subset}
           split: train
           num_proc: 10
-        - path: evie-8/kikuyu-data
-          name: {experiment_config.dataset_subset}
+        - path: jq/kikuyu-data-segmented
+          # name: {experiment_config.dataset_subset}
           split: train[:100]
           num_proc: 10
     source:
@@ -301,7 +327,7 @@ train:
 validation:
     huggingface_load:
         - path: evie-8/kikuyu-data
-          name: {experiment_config.dataset_subset}
+          name: duration_30s
           split: dev_test
     source:
       type: speech
@@ -345,7 +371,7 @@ def main():
 
     logger.info("=" * 60)
     logger.info(f"🎯 Experiment: {experiment_config.experiment_name}")
-    logger.info(f"📊 Dataset: {experiment_config.dataset_subset}")
+    # logger.info(f"📊 Dataset: {experiment_config.dataset_subset}")
     logger.info(f"🎲 Seed: {experiment_config.seed}")
     if experiment_config.train_duration_hours is not None:
         logger.info(
@@ -385,8 +411,8 @@ def main():
     logger.info("📚 Loading prompts dataset...")
     try:
         ds_prompts = load_dataset(
-            "evie-8/kikuyu-data",
-            name=experiment_config.dataset_subset,
+            "jq/kikuyu-data-segmented",
+            # name=experiment_config.dataset_subset,
             split="train",
         )
         sentence_to_prompt = {
@@ -516,7 +542,7 @@ def main():
 
         # Log flattened training args/config selectively (avoid huge nested dump)
         mlflow.log_param("experiment_name", experiment_config.experiment_name)
-        mlflow.log_param("dataset_subset", experiment_config.dataset_subset)
+        # mlflow.log_param("dataset_subset", experiment_config.dataset_subset)
         if experiment_config.train_duration_hours is not None:
             mlflow.log_param(
                 "train_duration_hours", experiment_config.train_duration_hours
